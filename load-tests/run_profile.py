@@ -20,6 +20,8 @@ def request(url: str) -> tuple[float, int]:
     try:
         with urllib.request.urlopen(f"{url.rstrip('/')}/ready", timeout=10) as response:
             status = response.status
+    except urllib.error.HTTPError as error:
+        status = error.code
     except Exception:
         status = 0
     return (time.perf_counter() - started) * 1000, status

@@ -27,6 +27,8 @@ from typing import Any
 
 from opentelemetry.trace import SpanKind
 from pyspark.sql import DataFrame, SparkSession
+from contextlib import contextmanager
+import os
 
 from lab28_platform import metrics
 from lab28_platform.contracts import IngestionEvent
@@ -46,6 +48,60 @@ from lab28_platform.telemetry import (
 )
 
 logger = logging.getLogger(__name__)
+
+_spark_provider: Any = None
+
+
+@contextmanager
+def _spark_span(
+    name: str,
+    *,
+    kind: SpanKind = SpanKind.CLIENT,
+    parent: Any = None,
+    attributes: dict[str, Any] | None = None,
+):
+    global _spark_provider
+    if os.environ.get("LAB28_OTEL_ENABLED", "false").lower() == "true":
+        if _spark_provider is None:
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+                from opentelemetry.sdk.resources import Resource
+                from opentelemetry.sdk.trace import TracerProvider
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+                endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
+                res = Resource.create(
+                    {
+                        "service.name": "lab28-spark",
+                        "service.namespace": "lab28",
+                        "deployment.environment": "lab",
+                    }
+                )
+                prov = TracerProvider(resource=res)
+                prov.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True)))
+                _spark_provider = prov
+            except Exception:
+                _spark_provider = None
+
+        if _spark_provider is not None:
+            from opentelemetry.trace import Status, StatusCode
+
+            tracer = _spark_provider.get_tracer("lab28-platform")
+            with tracer.start_as_current_span(
+                name, context=parent, kind=kind, attributes=attributes or {}
+            ) as active:
+                try:
+                    yield active
+                except Exception as error:
+                    active.record_exception(error)
+                    active.set_status(Status(StatusCode.ERROR, str(error)))
+                    raise
+                else:
+                    active.set_status(Status(StatusCode.OK))
+            return
+
+    with span(name, kind=kind, parent=parent, attributes=attributes) as active:
+        yield active
 
 #: The row shaper for each table, keyed the same way as ``TABLE_SCHEMAS`` so a
 #: new table cannot be half-added: declare a schema without a shaper and the
@@ -194,7 +250,7 @@ def merge_events(
     written = {table: len(table_rows) for table, table_rows in rows.items()}
 
     parent = context_from_traceparent(traceparent)
-    with span(
+    with _spark_span(
         SPAN_SPARK_DELTA_MERGE,
         kind=SpanKind.CLIENT,
         parent=parent,

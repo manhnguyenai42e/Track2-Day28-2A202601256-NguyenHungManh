@@ -240,6 +240,12 @@ def test_the_gateway_stops_routing_to_a_pod_that_is_not_ready(
         assert direct_body["status"] == "not_ready"
 
     _wait_for_status(api, "ready", timeout=180.0)
+    stack.wait_until(
+        "the gateway to resume routing to the recovered pod",
+        lambda: gateway.get("/ready").status_code == 200 or None,
+        timeout=60.0,
+        interval=1.0,
+    )
 
 
 @pytest.mark.gpu
